@@ -13,6 +13,7 @@ python news_tracker.py                      # last 7 days, everything
 python news_tracker.py --days 30 --deep     # wider window + topic-targeted queries (more coverage, slower)
 python news_tracker.py --companies Airbus BASF --countries France Germany Global
 python news_tracker.py --no-bing            # Google News only
+python news_tracker.py --all-languages      # include local-language news (default is English only)
 ```
 
 ## Output (`./output`)
@@ -23,7 +24,7 @@ python news_tracker.py --no-bing            # Google News only
   Task Scheduler / cron)
 
 ## What it does
-- Queries every company x geography in the local Google/Bing news edition (FR/EN/NL/DE/ES), using aliases and
+- Returns **English-language news only** by default (English editions per country + a language filter; use `--all-languages` to disable). Queries every company x geography, using aliases and
   subsidiaries (e.g. ContiTech, Yves Rocher, Soufflet).
 - Drops irrelevant hits (e.g. "continental breakfast") via per-company match/exclude rules.
 - De-duplicates across countries/engines and merges the countries where a story appeared.

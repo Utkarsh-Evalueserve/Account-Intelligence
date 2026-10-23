@@ -15,6 +15,7 @@ Usage examples
     python news_tracker.py --companies Airbus BASF  # subset of companies (partial, case-insensitive)
     python news_tracker.py --countries France Germany Global
     python news_tracker.py --no-bing                # Google News only
+    python news_tracker.py --all-languages          # include local-language news (default is English only)
 """
 from __future__ import annotations
 
@@ -39,6 +40,8 @@ import requests
 import config
 
 log = logging.getLogger("news_tracker")
+
+ENGLISH_ONLY = True  # set from CLI (--all-languages disables)
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -120,6 +123,27 @@ def is_relevant(company: str, text: str) -> bool:
     return not (exc and exc.search(norm) and not re.search(r"contitech|aumovio|continental ag", norm))
 
 
+_STOP = {
+    "en": "the and of to in for on with at by from is are was were has have will its their after as that this new over "
+          "into amid says said about up out more than against how why what who may could would".split(),
+    "foreign": (
+        "le la les des du une et est pour dans sur avec pas qui sont ses leur aux au par plus ce cette "  # fr
+        "der das und ist für mit von auf den dem ein eine nicht sich auch zu im bei nach wird werden über aus "  # de
+        "el los las del por para con una que se su como más pero sus al "  # es
+        "het een van voor met niet naar zijn bij ook maar wordt worden over dat deze"  # nl
+    ).split(),
+}
+_EN_RE = re.compile(r"(?<![a-z])(?:" + "|".join(_STOP["en"]) + r")(?![a-z])")
+_FOREIGN_RE = re.compile(r"(?<![a-z])(?:" + "|".join(_STOP["foreign"]) + r")(?![a-z])")
+
+
+def is_english(text: str) -> bool:
+    """Cheap stop-word language check; ambiguous (no stop words) headlines are kept."""
+    lowered = unicodedata.normalize("NFKD", text.lower())
+    lowered = "".join(c for c in lowered if not unicodedata.combining(c))
+    return len(_EN_RE.findall(lowered)) >= len(_FOREIGN_RE.findall(lowered))
+
+
 def _kw_regex(kws: list[str]) -> re.Pattern:
     # prefix match on the left boundary so "layoff" also hits "layoffs", "sustainab" hits "sustainability"
     return re.compile("|".join(r"(?<![a-z0-9])" + re.escape(normalise(k)) for k in kws if normalise(k)))
@@ -169,16 +193,18 @@ def company_query(company: str) -> str:
     return "(" + " OR ".join(f'"{a}"' for a in aliases) + ")"
 
 
-def build_jobs(companies, countries, days, deep, use_bing) -> list[Job]:
+def build_jobs(companies, countries, days, deep, use_bing, english_only=True) -> list[Job]:
     jobs: list[Job] = []
     for company in companies:
         base = company_query(company)
         for country in countries:
-            c = config.COUNTRIES[country]
+            c = dict(config.COUNTRIES[country])
+            if english_only:  # English-language edition of each country's news
+                c.update(hl="en", ceid=f"{c['gl']}:en", lang="en", bing_cc=c["gl"] if country != "Global" else "WW")
             variants = [("all news", base)]
             if deep:
                 variants.append(("topics (EN)", f"{base} AND ({_deep_en()})"))
-                local = config.LOCAL_DEEP_TERMS.get(c["lang"], "")
+                local = "" if english_only else config.LOCAL_DEEP_TERMS.get(c["lang"], "")
                 if local:
                     variants.append((f"topics ({c['lang'].upper()})", f"{base} AND ({local})"))
             for label, q in variants:
@@ -205,7 +231,7 @@ def fetch(session: requests.Session, job: Job, retries: int = 3, pause: float = 
                 continue
             resp.raise_for_status()
             feed = feedparser.parse(resp.content)
-            return list(parse_entries(feed, job))
+            return list(parse_entries(feed, job, ENGLISH_ONLY))
         except requests.RequestException as exc:
             log.debug("fetch error (%s/%s try %d): %s", job.company, job.country, attempt, exc)
             time.sleep(2 ** attempt)
@@ -213,7 +239,7 @@ def fetch(session: requests.Session, job: Job, retries: int = 3, pause: float = 
     return []
 
 
-def parse_entries(feed, job: Job):
+def parse_entries(feed, job: Job, english_only: bool = True):
     for e in feed.entries:
         raw_title = strip_html(e.get("title", ""))
         source = ""
@@ -236,6 +262,8 @@ def parse_entries(feed, job: Job):
         if not title or not link:
             continue
         if not is_relevant(job.company, f"{title} {snippet}"):
+            continue
+        if english_only and not is_english(f"{title} {snippet}"):
             continue
         art = Article(job.company, title, link, source, published, snippet)
         art.countries.add(job.country)
@@ -409,6 +437,7 @@ def main() -> None:
     ap.add_argument("--countries", nargs="*", help="subset of countries (partial names ok)")
     ap.add_argument("--deep", action="store_true", help="add topic-targeted queries (EN + local language)")
     ap.add_argument("--no-bing", action="store_true", help="skip Bing News (Google News only)")
+    ap.add_argument("--all-languages", action="store_true", help="include non-English news (default: English only)")
     ap.add_argument("--workers", type=int, default=6, help="parallel fetch threads (default 6)")
     ap.add_argument("--output-dir", default="output", help="where to write results (default ./output)")
     ap.add_argument("--html-max", type=int, default=15, help="max articles per category per company in HTML")
@@ -416,9 +445,11 @@ def main() -> None:
     args = ap.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(levelname)s %(message)s")
 
+    global ENGLISH_ONLY
+    ENGLISH_ONLY = not args.all_languages
     companies = pick(list(config.COMPANIES), args.companies, "company")
     countries = pick(list(config.COUNTRIES), args.countries, "country")
-    jobs = build_jobs(companies, countries, args.days, args.deep, not args.no_bing)
+    jobs = build_jobs(companies, countries, args.days, args.deep, not args.no_bing, ENGLISH_ONLY)
     now = datetime.now(timezone.utc)
     print(f"Tracking {len(companies)} companies x {len(countries)} geographies "
           f"-> {len(jobs)} feed requests (last {args.days} days)")
